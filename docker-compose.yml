@@ -1,0 +1,35 @@
+services:
+  report-builder:
+    build: .
+    env_file:
+      - path: .env.example
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: sqlite:////app/data/report_builder.db
+      AUTO_CREATE_SCHEMA: "false"
+    ports:
+      - "8505:8505"
+    volumes:
+      - report_builder_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8505/api/v1/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  report-builder-web:
+    build:
+      context: ..
+      dockerfile: report_builder/frontend/Dockerfile
+    environment:
+      VITE_API_PROXY_TARGET: http://report-builder:8505
+      VITE_IDENTITY_PROXY_TARGET: http://host.docker.internal:8500
+    ports:
+      - "7505:7505"
+    depends_on:
+      report-builder:
+        condition: service_healthy
+
+volumes:
+  report_builder_data:
