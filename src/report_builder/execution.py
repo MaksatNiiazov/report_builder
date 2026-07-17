@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -13,6 +14,7 @@ from openpyxl import Workbook
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.pool import NullPool
+from sqlglot import exp, parse_one
 
 from .config import settings
 from .crypto import decrypt_secret
@@ -57,7 +59,7 @@ def execute_report(report: Report, raw_values: dict[str, Any], requested_limit: 
         )
         inner_sql = strip_trailing_semicolon(report.query_template)
         if source.engine == "mssql":
-            wrapped_sql = f"SELECT TOP {limit + 1} * FROM (\n{inner_sql}\n) AS report_result"
+            wrapped_sql = _wrap_mssql_query(inner_sql, limit + 1)
         else:
             wrapped_sql = f"SELECT * FROM (\n{inner_sql}\n) AS report_result LIMIT :report_row_limit"
         with target_engine.connect() as connection:
@@ -92,15 +94,10 @@ def execute_report(report: Report, raw_values: dict[str, Any], requested_limit: 
     except QueryExecutionError:
         raise
     except DBAPIError as exc:
-        code = "query_timeout" if "statement timeout" in str(exc).lower() else "database_error"
-        message = (
-            "Превышено время выполнения отчета"
-            if code == "query_timeout"
-            else "База данных отклонила запрос отчета"
-        )
+        code, message = _database_error(exc)
         raise QueryExecutionError(code, message) from exc
     except SQLAlchemyError as exc:
-        raise QueryExecutionError("connection_error", "Не удалось подключиться к источнику") from exc
+        raise QueryExecutionError("connection_error", _connection_error_message(exc)) from exc
     finally:
         if target_engine is not None:
             target_engine.dispose()
@@ -123,7 +120,7 @@ def test_data_source(source: DataSource) -> None:
             finally:
                 transaction.rollback()
     except SQLAlchemyError as exc:
-        raise QueryExecutionError("connection_error", "Не удалось подключиться к источнику") from exc
+        raise QueryExecutionError("connection_error", _connection_error_message(exc)) from exc
     finally:
         target_engine.dispose()
 
@@ -131,6 +128,58 @@ def test_data_source(source: DataSource) -> None:
 def _connect_args(source: DataSource) -> dict[str, int]:
     timeout = min(settings.query_timeout_seconds, 10)
     return {"connect_timeout": timeout} if source.engine == "postgresql" else {"timeout": timeout}
+
+
+def _wrap_mssql_query(inner_sql: str, limit: int) -> str:
+    """Apply the service row limit without breaking MSSQL ORDER BY queries."""
+    query = inner_sql
+    try:
+        parsed = parse_one(query, read="tsql")
+        if parsed.args.get("order") is not None and parsed.args.get("offset") is None:
+            parsed.set("offset", exp.Offset(expression=exp.Literal.number(0)))
+            query = parsed.sql(dialect="tsql")
+    except Exception:
+        # The validator already reports parser errors. Keep execution errors focused on SQL Server.
+        query = inner_sql
+    return f"SELECT TOP {limit} * FROM (\n{query}\n) AS report_result"
+
+
+def _database_error(exc: DBAPIError) -> tuple[str, str]:
+    raw = str(getattr(exc, "orig", None) or exc)
+    normalized = raw.casefold()
+    if "statement timeout" in normalized or "query timeout" in normalized:
+        return "query_timeout", "Превышено время выполнения отчёта. Уменьшите объём данных или добавьте фильтр."
+    if "18488" in normalized or "must be changed" in normalized:
+        return "connection_error", "Пароль пользователя источника требует смены на SQL Server."
+    if "28000" in normalized or "login failed" in normalized:
+        return "connection_error", "Не удалось войти в источник: проверьте логин, пароль и права пользователя."
+    if "42s02" in normalized or "invalid object name" in normalized:
+        return "database_error", f"Таблица или представление не найдено. Проверьте имя и схему. Детали: {_safe_error(raw)}"
+    if "42s22" in normalized or "invalid column" in normalized or "column name" in normalized:
+        return "database_error", f"Столбец не найден. Проверьте имена столбцов. Детали: {_safe_error(raw)}"
+    if "syntax" in normalized or "incorrect syntax" in normalized:
+        return "database_error", f"Синтаксическая ошибка SQL. Детали: {_safe_error(raw)}"
+    return "database_error", f"База данных отклонила запрос. Детали: {_safe_error(raw)}"
+
+
+def _connection_error_message(exc: SQLAlchemyError) -> str:
+    raw = str(getattr(exc, "orig", None) or exc)
+    normalized = raw.casefold()
+    if "18488" in normalized or "must be changed" in normalized:
+        return "Пароль пользователя источника требует смены на SQL Server."
+    if "28000" in normalized or "login failed" in normalized:
+        return "Не удалось войти в источник: проверьте логин, пароль и права пользователя."
+    if "timeout" in normalized or "timed out" in normalized:
+        return "Источник не отвечает вовремя. Проверьте IP, порт, VPN и firewall."
+    if "driver" in normalized and ("not found" in normalized or "data source name" in normalized):
+        return "ODBC-драйвер для выбранной СУБД не установлен на backend-сервере."
+    return f"Не удалось подключиться к источнику. Детали: {_safe_error(raw)}"
+
+
+def _safe_error(value: str) -> str:
+    value = re.sub(r"(?i)(password|pwd)=([^;\s]+)", r"\1=***", value)
+    value = re.sub(r"(?i)(://[^:/\s]+:)[^@\s]+@", r"\1***@", value)
+    return value[:500]
 
 
 def coerce_parameters(

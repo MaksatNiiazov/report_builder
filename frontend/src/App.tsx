@@ -53,7 +53,7 @@ const emptyReport = (sourceId = 0): ReportWrite => ({
   name: "",
   description: "",
   data_source_id: sourceId,
-  query_template: "SELECT\n  column_name\nFROM dbo.table_name\nWHERE created_at >= :date_from",
+  query_template: "",
   parameters: [
     {
       name: "date_from",
@@ -70,8 +70,7 @@ const emptyReport = (sourceId = 0): ReportWrite => ({
 });
 
 function queryTemplateForEngine(engine: DataSource["engine"] = "mssql") {
-  const schema = engine === "mssql" ? "dbo" : "public";
-  return `SELECT\n  column_name\nFROM ${schema}.table_name\nWHERE created_at >= :date_from`;
+  return "";
 }
 
 export default function App() {
@@ -280,7 +279,7 @@ function ReportCatalog({ reports, canManage }: { reports: ReportSummary[]; canMa
     if (!selected) return;
     setState({ loading: true, error: null, notice: null });
     try {
-      setPreview(await previewReport(selected.id, values));
+      setPreview(await previewReport(selected.id, values, rowLimit));
       setState(emptyState);
     } catch (error) {
       setState({ loading: false, error: errorMessage(error), notice: null });
@@ -407,7 +406,7 @@ function ReportAdminPage({ reports, onChanged }: { reports: ReportSummary[]; onC
       <div className="editor-toolbar"><div><span className="eyebrow">{editingId ? `Отчет #${editingId}` : "Новый отчет"}</span><h2>{form.name || "Без названия"}</h2></div><div className="toolbar-actions"><label className="publish-toggle"><input type="checkbox" checked={form.is_published} onChange={(event) => setForm({ ...form, is_published: event.target.checked })} /><span>{form.is_published ? "Опубликован" : "Черновик"}</span></label><button className="button primary" type="submit" disabled={state.loading}>Сохранить</button></div></div>
       {state.error && <Notice tone="error" text={state.error} onClose={() => setState(emptyState)} />}{state.notice && <Notice tone="success" text={state.notice} onClose={() => setState(emptyState)} />}
       <section className="editor-section"><h3>Карточка</h3><div className="form-grid"><label>Название<input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></label><label>Код<input required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value={form.slug} onChange={(event) => setForm({ ...form, slug: event.target.value.toLowerCase() })} /></label><label>Источник<select required value={form.data_source_id || ""} onChange={(event) => setForm({ ...form, data_source_id: Number(event.target.value) })}><option value="">Выберите источник</option>{sources.filter((source) => source.is_active).map((source) => <option value={source.id} key={source.id}>{source.name}</option>)}</select></label><label className="span-3">Описание<textarea rows={2} value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></label></div></section>
-      <section className="editor-section sql-section"><div className="section-heading"><h3>SQL-шаблон</h3><span>{sources.find((source) => source.id === form.data_source_id)?.engine === "postgresql" ? "PostgreSQL" : "MSSQL"}</span></div><textarea className="sql-editor" spellCheck={false} required value={form.query_template} onChange={(event) => setForm({ ...form, query_template: event.target.value })} /></section>
+      <section className="editor-section sql-section"><div className="section-heading"><h3>SQL-шаблон</h3><span>{sources.find((source) => source.id === form.data_source_id)?.engine === "postgresql" ? "PostgreSQL" : "MSSQL"}</span></div><p className="form-hint">Разрешён один параметризованный SELECT или CTE. Не используйте INSERT, UPDATE, DELETE и другие команды изменения данных.</p><textarea className="sql-editor" spellCheck={false} required placeholder={sources.find((source) => source.id === form.data_source_id)?.engine === "postgresql" ? "SELECT\n  column_name\nFROM public.table_name\nWHERE created_at >= :date_from" : "SELECT\n  TOP 100 column_name\nFROM dbo.table_name\nWHERE created_at >= :date_from"} value={form.query_template} onChange={(event) => setForm({ ...form, query_template: event.target.value })} /></section>
       <section className="editor-section"><div className="section-heading"><h3>Параметры</h3><button className="button secondary compact" type="button" onClick={() => setForm({ ...form, parameters: [...form.parameters, { name: "parameter", label: "Параметр", type: "text", required: true, default: null, placeholder: null }] })}><Icon name="plus" size={15} /> Добавить</button></div><div className="parameter-admin-list">{form.parameters.map((parameter, index) => <div className="parameter-row" key={`${index}-${parameter.name}`}><label>Имя<input required value={parameter.name} onChange={(event) => updateParameter(index, { name: event.target.value })} /></label><label>Подпись<input required value={parameter.label} onChange={(event) => updateParameter(index, { label: event.target.value })} /></label><label>Тип<select value={parameter.type} onChange={(event) => updateParameter(index, { type: event.target.value as ParameterType })}>{["text", "integer", "decimal", "date", "datetime", "boolean"].map((type) => <option key={type}>{type}</option>)}</select></label><label className="checkbox-field"><input type="checkbox" checked={parameter.required} onChange={(event) => updateParameter(index, { required: event.target.checked })} /><span>Обязательный</span></label><button className="icon-button danger" title="Удалить параметр" type="button" onClick={() => setForm({ ...form, parameters: form.parameters.filter((_, itemIndex) => itemIndex !== index) })}><Icon name="ban" size={16} /></button></div>)}</div></section>
       <section className="editor-section"><h3>Лимиты</h3><div className="form-grid limits"><label>По умолчанию<input type="number" min="1" max={form.max_row_limit} value={form.default_row_limit} onChange={(event) => setForm({ ...form, default_row_limit: Number(event.target.value) })} /></label><label>Максимум<input type="number" min="1" max="50000" value={form.max_row_limit} onChange={(event) => setForm({ ...form, max_row_limit: Number(event.target.value) })} /></label></div></section>
     </form>
